@@ -25,7 +25,7 @@ sequenceDiagram
     end
     C->>L: Tool results for another selection turn
     L-->>C: More tool requests or no calls
-    C->>S: Close session; terminate child process
+    C->>S: Close session and terminate child process
     C->>L: Fetched evidence + structured output schema
     L-->>C: Final investigation JSON
     C-->>U: Validated answer, citation checks, saved trace
