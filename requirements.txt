@@ -1,0 +1,5 @@
+streamlit==1.64.0
+pydantic==2.13.5
+httpx==0.28.1
+pandas==3.0.6
+mcp==1.30.0
