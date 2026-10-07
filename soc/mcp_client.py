@@ -12,7 +12,7 @@ import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from soc.core import SYSTEM
+from soc.core import GATHER_SYSTEM
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -96,7 +96,7 @@ async def gather(request, host, trace):
         definitions = [{"type": "function", "function": {"name": t.name, "description": t.description,
                        "parameters": t.inputSchema}} for t in tools if t.name in allowed]
         messages = [dict(m) for m in request["messages"]]
-        messages[0] = {"role": "system", "content": SYSTEM.replace("No tool access or live log access is available.", "Use the supplied tools to gather synthetic evidence. Fetch the user profile and timeline before answering. Do not invent tool results.")}
+        messages[0] = {"role": "system", "content": GATHER_SYSTEM}
         calls = 0
         async with httpx.AsyncClient(timeout=180, trust_env=False) as client:
             for turn in range(4):

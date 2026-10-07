@@ -8,7 +8,7 @@ from soc.evidence_summary import summarize_mcp
 from soc.core import Investigation, estimate_context
 
 
-def show_request(request, dropped=0, response=None):
+def show_request(request, dropped=0, response=None, mcp=False):
     options = request.get("options", {})
     limit = options.get("num_ctx")
     reserve = options.get("num_predict", 0)
@@ -26,7 +26,7 @@ def show_request(request, dropped=0, response=None):
         st.progress(min((estimated + reserve) / limit, 1.0), text="Estimated input + maximum output / requested context")
         if estimated + reserve > limit:
             st.warning("Estimated input plus output allowance exceeds the requested window. Shorten the conversation or increase the context setting. This estimate cannot detect server truncation.")
-    st.write(f"History policy: last 8 messages retained; {dropped} earlier messages omitted from this request.")
+    st.write("History policy: MCP investigations do not retain conversation history." if mcp else f"History policy: last 8 messages retained; {dropped} earlier messages omitted from this request.")
     st.dataframe(rows, width="stretch", hide_index=True)
     if response is not None:
         st.write(f"Ollama-reported input: {reported if reported is not None else 'unavailable'} tokens · generated output: {generated if generated is not None else 'unavailable'} tokens")
@@ -101,44 +101,139 @@ def show_mcp_summary(run):
         st.caption("Older run: collected evidence is reconstructed where possible from recorded successful tool results. Missing fields are not assumed to have been fetched.")
 
 
-def show_run(run, location="inspector"):
-    show_execution(run, location)
-    show_mcp_summary(run)
-    if run.get("mode") == "mcp" and run.get("initial_request"):
-        with st.expander("Initial alert-only request before MCP gathering"):
-            st.json(run["initial_request"])
-    show_request(run["request"], run.get("history_messages_dropped", 0), run.get("response"))
-    if run.get("mcp_trace"):
-        st.subheader("MCP execution trace")
-        if run.get("mcp_evidence_warning"):
-            st.warning(run["mcp_evidence_warning"])
-        st.caption("Final response metrics below exclude intermediate model calls. Full intermediate usage is recorded in each tool-selection response; end-to-end latency includes all stages.")
-        for index, step in enumerate(run["mcp_trace"], 1):
-            with st.expander(f"{index}. {step['step']}"):
-                st.json(step)
-    st.subheader("Response inspection")
-    raw, validated = st.columns(2)
-    body = run.get("response") or {}
-    with raw:
-        st.markdown("**Raw model content**")
-        st.code(body.get("message", {}).get("content", "No model content returned"), language="json")
-        if body.get("message", {}).get("thinking"):
-            with st.expander("Model-emitted thinking field"):
-                st.code(body["message"]["thinking"], language="text")
-        st.caption(f"Stop reason: {body.get('done_reason', 'not reported')}")
-    with validated:
-        st.markdown("**Validated application output**")
-        if run["schema_valid"]:
-            st.json(Investigation.model_validate_json(body["message"]["content"]).model_dump())
-            st.success("Output schema passed")
-        else:
-            st.error(run.get("error") or "Schema validation failed")
-        checks = run.get("checks")
-        if checks:
-            if checks["unknown_evidence_ids"]:
-                st.warning(f"Unknown evidence IDs: {checks['unknown_evidence_ids']}")
+def final_evidence(run):
+    """Read the evidence actually present in the final request, including old runs."""
+    try:
+        message = run["request"]["messages"][1]["content"]
+        if not message.startswith("Evidence:\n"):
+            return {}
+        return json.loads(message.split("\n", 1)[1])
+    except (KeyError, IndexError, ValueError, TypeError):
+        return {}
+
+
+def show_findings(run):
+    evidence = final_evidence(run)
+    records = {record["id"]: (record, source) for key, source in
+               (("events", "query_login_events"), ("device_history", "get_device_history"))
+               for record in evidence.get(key, []) if "id" in record}
+    try:
+        answer = json.loads((run.get("response") or {})["message"]["content"])
+    except (KeyError, ValueError, TypeError):
+        st.info("No readable final findings recorded.")
+        return
+    st.caption("These records were included in final generation. A matching citation does not prove that the record supports the claim.")
+    for index, finding in enumerate(answer.get("findings", []), 1):
+        with st.expander(f"Finding {index}: {finding.get('claim', '')}"):
+            for citation in finding.get("evidence_ids", []):
+                if citation not in records:
+                    st.warning(f"{citation}: not found in final-generation evidence.")
+                    continue
+                record, tool = records[citation]
+                st.write(f"{citation} · " + (f"Retrieved through {tool}" if run.get("mode") == "mcp" else "Supplied directly"))
+                st.json(record)
+
+
+def show_tool_outcomes(run):
+    trace = run.get("mcp_trace", [])
+    names = {tool["name"] for step in trace if step.get("step") == "MCP tools/list"
+             for tool in step.get("tools", []) if tool["name"] != "server_info"}
+    requests = []
+    for step in trace:
+        if step.get("step") == "Model tool selection":
+            requests.extend(call.get("function", {}) for call in step.get("response", {}).get("message", {}).get("tool_calls", []) or [])
+    names.update(call.get("name") for call in requests if call.get("name"))
+    rows = []
+    for name in sorted(names):
+        attempts = [step for step in trace if step.get("tool") == name and step.get("step") in {"MCP tools/call", "Rejected tool", "Failed tool call"}]
+        outcomes = []
+        for step in attempts:
+            if step["step"] == "Rejected tool":
+                outcomes.append("Rejected")
+            elif step["step"] == "Failed tool call" or step.get("result", {}).get("isError"):
+                outcomes.append("Failed")
+            elif step.get("result", {}).get("isError") is False:
+                outcomes.append("Succeeded")
             else:
-                st.success(f"All {checks['citation_count']} citation references resolve to supplied evidence records")
-        st.caption("Schema and citation checks do not evaluate whether the evidence supports the claim.")
-    with st.expander("Full server response and run metadata"):
+                outcomes.append("Outcome unknown")
+        if not outcomes:
+            outcomes = ["Requested but not executed" if any(call.get("name") == name for call in requests) else "Not requested"]
+        rows.append({"Tool": name, "Role": "Required evidence" if name in {"get_user", "query_login_events"} else "Optional", "Recorded outcomes": ", ".join(outcomes)})
+    if rows:
+        st.dataframe(rows, hide_index=True, width="stretch")
+    else:
+        st.info("No tool discovery or selection recorded.")
+    st.caption("An unused optional tool is not automatically a failure. Repeated attempts may have different outcomes; inspect the execution steps.")
+
+
+def show_compact_summary(run):
+    if run.get("mode") != "mcp":
+        return
+    summary = summarize_mcp(run)
+    st.write(f"MCP: {len(summary['successful_calls'])} successful calls · {summary['event_count']} events · {summary['device_count']} device records · user profile: {'yes' if summary['user_fetched'] else 'no'}")
+    for warning in summary["warnings"]:
+        st.warning(warning)
+    st.caption("Open Learning inspector to follow requests, results, and citations.")
+
+
+def show_run(run, location="inspector"):
+    mcp = run.get("mode") == "mcp"
+    st.caption("Follow one investigation from its initial input to its final answer. Details below are recorded results, not live progress.")
+    with st.expander("Execution overview"):
+        show_execution(run, location)
+    with st.expander("1. Initial input", expanded=True):
+        initial = run.get("initial_request")
+        if initial:
+            st.json(initial)
+        else:
+            st.info("Initial payload was not stored in this older run.")
+        st.caption("Prepared application payload; this is not a record of transmission. In MCP mode, tool definitions are added after discovery. Older runs may show an instruction that was replaced before transmission.")
+        selections = [step for step in run.get("mcp_trace", []) if step.get("step") == "Model tool selection"]
+        if mcp and selections:
+            st.markdown("**Actual system message sent for evidence gathering**")
+            for index, step in enumerate(selections, 1):
+                messages = step.get("request", {}).get("messages", [])
+                system = next((message.get("content", "") for message in messages if message.get("role") == "system"), None)
+                if system is not None:
+                    st.code(system, language="text")
+                    st.caption(f"Recorded gathering turn {step.get('turn', index)}. Complete requests appear in stage 3.")
+                    break
+            else:
+                st.info("The actual gathering system message was not recorded.")
+        st.write("MCP mode investigates each question without conversation history." if mcp else "Direct mode retains the last eight conversation messages.")
+    if mcp:
+        with st.expander("2. Available tools and retrieval outcomes", expanded=True):
+            show_tool_outcomes(run)
+            for step in run.get("mcp_trace", []):
+                if step.get("step") == "MCP tools/list":
+                    with st.expander("Discovered tool definitions"):
+                        st.json(step.get("tools", []))
+        with st.expander("3. Model requests and actual tool results"):
+            for index, step in enumerate(run.get("mcp_trace", []), 1):
+                if step.get("step") in {"Model tool selection", "MCP tools/call", "Rejected tool", "Failed tool call", "Gathering stopped", "Tool call limit reached", "Model turn limit reached"} and step.get("tool") != "server_info":
+                    with st.expander(f"{index}. {step['step']} · {step.get('tool', '')}"):
+                        st.json(step)
+        with st.expander("4. Collected evidence"):
+            show_mcp_summary(run)
+    with st.expander("5. Final-generation request" if mcp else "2. Generation request"):
+        st.markdown("**System message for answer generation**")
+        messages = run.get("request", {}).get("messages", [])
+        for message in messages:
+            if message.get("role") == "system":
+                st.code(message.get("content", ""), language="text")
+        st.json(run.get("request", {}))
+        if not run.get("generation_started", bool(run.get("response"))):
+            st.warning("Final generation did not start; this is the last prepared request.")
+    with st.expander("6. Answer, citations, and validation" if mcp else "3. Answer, citations, and validation", expanded=True):
+        show_findings(run)
+        st.write("Output schema: " + ("passed" if run.get("schema_valid") else "failed or not completed"))
+        if run.get("checks"):
+            st.json(run["checks"])
+        if run.get("error"):
+            st.error(run["error"])
+        with st.expander("Raw model response"):
+            st.json(run.get("response"))
+    with st.expander("Context and token diagnostics · final generation"):
+        show_request(run["request"], run.get("history_messages_dropped", 0), run.get("response"), mcp=mcp)
+    with st.expander("Complete recorded run and protocol diagnostics"):
         st.json(run)

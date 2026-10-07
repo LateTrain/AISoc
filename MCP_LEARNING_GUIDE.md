@@ -157,3 +157,16 @@ Review [soc/execution.py](soc/execution.py) for the UI-independent event project
 The visual now covers the full application flow in both modes: submission → prompt preparation → optional MCP gathering → final Ollama request → response → schema/citation validation → saved monitoring run. Direct mode prepares reference evidence immediately; MCP mode prepares alert metadata and later assembles retrieved evidence. New runs record the generation-start boundary and persistence metadata, so a gathering failure cannot be confused with a completed final model call. Historical runs without those fields retain only the stages their records support.
 
 The main MCP investigation panel now separates **Incoming alert** from **Retrieved investigation evidence**. Before an investigation, only alert metadata is shown prominently. Afterward, the latest run's successful results populate the panel. The full fixture is available in a collapsed **Scenario reference evidence** section for comparison; it is not a fallback for missing retrievals. This display updates after completion, not in real time yet.
+
+## Using the staged Learning inspector
+
+Start with one question: what evidence did the model request, and did that evidence support its answer? The Investigation tab provides a compact retrieval summary; the Learning inspector follows the recorded stages.
+
+1. **Initial input:** the prepared payload before tool selection. MCP questions start without conversation history.
+2. **Available tools and retrieval outcomes:** distinguish not requested, requested but not executed, failed/rejected, and succeeded. Profile and timeline are required by this lab’s gathering instruction; device history is optional.
+3. **Model requests and actual tool results:** compare each model turn with subsequent calls. These selection requests contain the actual tool definitions sent to Ollama.
+4. **Collected evidence:** inspect what retrieval produced, including MCP-only device records.
+5. **Final-generation request:** verify what evidence was actually sent for the answer. If gathering failed, final generation may not have started.
+6. **Answer, citations, and validation:** expand a finding to trace its citation to a record in final-generation input. A matching ID establishes presence, not factual support.
+
+Execution overview and complete metadata are supplementary details. Context diagnostics describe final generation; they do not summarize the token usage of intermediate model turns. Use Model monitoring to compare two saved experiments, checking question, history, scenario, mode, prompt version, and settings before attributing differences to the model.

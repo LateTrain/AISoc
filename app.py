@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from soc.core import Investigation, build_request, investigate, load_runs
-from soc.inspector import show_request, show_run, show_mcp_summary, show_execution
+from soc.inspector import show_request, show_run, show_mcp_summary, show_execution, show_compact_summary
 from soc.data import SCENARIOS
 from soc.mcp_client import demo
 from soc.evidence_summary import summarize_mcp
@@ -35,7 +35,7 @@ with st.sidebar:
         seed = st.number_input("Seed", min_value=1, max_value=2147483647, value=42, disabled=not fixed_seed)
         st.caption("Sent as API options, separately from the system prompt. At temperature 0, sampling filters and seed may have little or no visible effect.")
     sampling = dict(temperature=temperature, top_p=top_p, top_k=int(top_k), repeat_penalty=repeat_penalty, seed=int(seed) if fixed_seed else None)
-    mcp_mode = st.checkbox("Gather evidence through MCP", help="Starts with alert metadata; the model requests evidence from a separate Python process.")
+    mcp_mode = st.checkbox("Gather evidence through MCP", value=True, help="Starts with alert metadata; the model requests evidence from a separate Python process.")
     scenario = st.selectbox("Scenario", list(SCENARIOS), key="scenario")
     st.caption("Change models to compare saved runs. No model downloads are triggered.")
     def clear_conversation():
@@ -77,8 +77,8 @@ with investigation_tab:
                     st.info("No supporting evidence was retrieved in this run.")
             else:
                 st.info("No evidence retrieved yet. Submit an investigation to see what the model fetches.")
-            with st.expander("Scenario reference evidence (complete fixture for verification)"):
-                st.caption("Learning reference only. This complete fixture is not automatically supplied to the model in MCP mode.")
+            with st.expander("Scenario reference evidence (profile and event timeline)"):
+                st.caption("Learning reference only. These profile and timeline fixtures are not automatically supplied to the model in MCP mode. Device history is a separate MCP-only source.")
                 st.write(evidence["alert"])
                 st.json(evidence["user"])
                 st.dataframe(evidence["events"], width="stretch")
@@ -96,8 +96,7 @@ with investigation_tab:
                     st.json(json.loads(message["content"]))
                     saved = next((r for r in load_runs() if r["id"] == message.get("run_id")), None)
                     if saved:
-                        show_execution(saved, "chat")
-                        show_mcp_summary(saved)
+                        show_compact_summary(saved)
                 else:
                     st.write(message["content"])
         initial = st.button("Investigate this alert", disabled=bool(chat))
@@ -114,15 +113,17 @@ with investigation_tab:
                 st.rerun()
             else:
                 st.error(f"Investigation failed; saved in monitoring. {run['error']}")
-                show_execution(run, "failed-chat")
-                show_mcp_summary(run)
+                show_compact_summary(run)
 
 with learning_tab:
     st.subheader("Preview your next request")
     preview = st.text_area("Question to preview", "Investigate this alert. What happened, what is uncertain, and what should we check next?")
     st.caption("Preview only: submit your question through Analyst chat. This panel makes no model calls.")
     if mcp_mode:
-        st.info("MCP mode begins with alert metadata and discovered tools. Inspect exact tool-selection requests and the final evidence request in the saved run trace.")
+        st.write("Initial alert metadata preview")
+        st.json({"alert_id": f"alert-{list(SCENARIOS).index(scenario) + 1}", "alert": evidence["alert"], "user_id": evidence["user"]["id"]})
+        st.write("Question: " + preview)
+        st.caption("No conversation history is retained in MCP mode. Tool definitions are discovered when the investigation starts; inspect the recorded tool-selection requests afterward.")
     else:
         show_request(build_request(preview, evidence, model, chat, int(num_ctx), int(num_predict), **sampling), max(0, len(chat) - 8))
     latest = next((r for r in load_runs() if r["id"] == st.session_state.get("last_run")), None)
@@ -139,7 +140,10 @@ with mcp_tab:
     st.caption("The app launches and initializes the server, discovers tools, and calls them. Each connection stops its child process on completion. This is actual MCP, not simulated tool calls.")
     if st.button("Discover tools and fetch sample evidence (no model)"):
         with st.spinner("Starting MCP server and calling tools…"):
+            st.session_state.mcp_demo_scenario = scenario
             st.session_state.mcp_demo = demo(f"alert-{list(SCENARIOS).index(scenario) + 1}")
+    if st.session_state.get("mcp_demo"):
+        st.caption("Displayed demo scenario: " + st.session_state.get("mcp_demo_scenario", "Not recorded"))
     for step in st.session_state.get("mcp_demo", []):
         with st.expander(step["step"], expanded=True):
             st.json(step)
@@ -159,14 +163,29 @@ with monitoring_tab:
                  "input_tokens": r["metrics"].get("prompt_eval_count"),
                  "output_tokens": r["metrics"].get("eval_count"),
                  "tokens_per_second": r["metrics"].get("tokens_per_second")} for r in runs]
+        for row, recorded in zip(rows, runs):
+            if recorded.get("mode") == "mcp":
+                summary = summarize_mcp(recorded)
+                row.update(events_fetched=summary["event_count"], device_records=summary["device_count"], user_profile=summary["user_fetched"], tools_used=", ".join(c["tool"] for c in summary["successful_calls"]), gathering_warnings=" ".join(summary["warnings"]))
+            row["unknown_citations"] = ", ".join((recorded.get("checks") or {}).get("unknown_evidence_ids", []))
         frame = pd.DataFrame(rows)
         a, b, c = st.columns(3)
         a.metric("Runs", len(runs))
         b.metric("API / schema errors", sum(r["status"] == "error" for r in runs))
         c.metric("Citation warnings", sum(r["status"] == "citation_warning" for r in runs))
         st.dataframe(frame, width="stretch")
-        st.write("Latency by model (includes failures and model loading)")
-        st.dataframe(frame.groupby("model").agg(runs=("model", "size"), median_latency_s=("latency_s", "median")), width="stretch")
+        with st.expander("Compare two saved experiments"):
+            labels = lambda i: f"{runs[i]['timestamp']} · {runs[i]['model']} · {runs[i]['scenario']} · {runs[i].get('mode', 'direct')}"
+            first = st.selectbox("First run", range(len(runs)), format_func=labels)
+            second = st.selectbox("Second run", range(len(runs)), index=min(1, len(runs)-1), format_func=labels)
+            comparison = []
+            for index in (first, second):
+                item = runs[index]
+                summary = summarize_mcp(item)
+                question = item.get("submission", {}).get("question") or item.get("request", {}).get("messages", [{}])[-1].get("content")
+                comparison.append({"Run": item["id"], "Model": item["model"], "Scenario": item["scenario"], "Mode": item.get("mode", "direct"), "Question": question, "Settings": item["request"].get("options", {}), "Prompt version": item.get("prompt_version"), "Latency seconds": item.get("latency_s"), "Status": item.get("status"), "Tools": [c["tool"] for c in summary["successful_calls"]], "Citation warnings": (item.get("checks") or {}).get("unknown_evidence_ids", [])})
+            st.json(comparison)
+            st.caption("Compare matching questions, history, scenarios, modes, prompt versions, and settings. Latency includes model loading and failures; final token counts exclude intermediate calls.")
         selected = st.selectbox("Inspect a run", range(len(runs)), format_func=lambda i: f"{runs[i]['timestamp']} · {runs[i]['model']} · {runs[i]['scenario']}")
         run = runs[selected]
         if run["checks"] and run["checks"]["unknown_evidence_ids"]:
