@@ -72,13 +72,13 @@ class DeviceEvidenceTests(unittest.TestCase):
                 client.return_value.__aenter__.return_value = mock
                 return await gather(request, 'http://test', trace)
         evidence = asyncio.run(check())
-        self.assertEqual(len(evidence['events']), 3)
+        self.assertEqual(len(evidence['events']), 14)
         self.assertEqual(evidence['device_history'][0]['id'], 'device-u101-1')
         self.assertEqual(len([t for t in trace if t['step'] == 'Rejected tool']), 1)
         self.assertFalse(any(t.get('tool') == 'get_device_history' and t.get('arguments', {}).get('user_id') == 'u-102' for t in trace if t['step'] == 'MCP tools/call'))
         from soc.evidence_summary import summarize_mcp
         summary = summarize_mcp({'mcp_trace': trace, 'evidence_collected': evidence})
-        self.assertEqual(summary['event_count'], 3)
+        self.assertEqual(summary['event_count'], 14)
         self.assertEqual(summary['device_count'], 1)
         self.assertTrue(summary['user_fetched'])
         self.assertEqual(len(summary['problems']), 1)

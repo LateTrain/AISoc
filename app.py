@@ -50,7 +50,67 @@ if st.session_state.get("context") != context:
     st.session_state.context = context
 chat = st.session_state.setdefault("chat", [])
 evidence = SCENARIOS[scenario]
-investigation_tab, learning_tab, mcp_tab, monitoring_tab = st.tabs(["Investigation", "Learning inspector", "MCP lab", "Model monitoring"])
+def submit_question(question):
+    question = question or "Investigate this alert. What happened, what is uncertain, and what should we check next?"
+    with st.spinner("Waiting for Ollama…"):
+        run = investigate(question, evidence, model, host, chat, scenario, num_ctx=int(num_ctx), num_predict=int(num_predict), mcp_mode=mcp_mode, **sampling)
+    st.session_state.last_run = run["id"]
+    if run["schema_valid"]:
+        chat.extend([{"role": "user", "content": question},
+                     {"role": "assistant", "run_id": run["id"], "content": Investigation.model_validate_json(run["response"]["message"]["content"]).model_dump_json()}])
+        st.session_state.last_run = run["id"]
+        st.rerun()
+    else:
+        st.error(f"Investigation failed; saved in monitoring. {run['error']}")
+        show_compact_summary(run)
+
+simple_tab, investigation_tab, learning_tab, mcp_tab, monitoring_tab = st.tabs(["Simple Q&A", "Investigation", "Learning inspector", "MCP lab", "Model monitoring"])
+with simple_tab:
+    st.subheader("Selected alert")
+    st.write(evidence["alert"])
+    st.caption(f"Scenario: {scenario} · Alert: alert-{list(SCENARIOS).index(scenario) + 1} · User: {evidence['user']['id']}")
+    st.caption("The analyst starts with this alert and requests supporting evidence through MCP." if mcp_mode else "The analyst receives this alert and the scenario's supporting evidence directly.")
+    st.divider()
+    st.caption("Same investigation and conversation, formatted for reading. Technical details are in the other tabs.")
+    for message in chat:
+        with st.chat_message(message["role"]):
+            if message["role"] == "user":
+                st.write(message["content"])
+            else:
+                answer = Investigation.model_validate_json(message["content"])
+                st.write(answer.summary)
+                if answer.findings:
+                    st.markdown("**Findings**")
+                    for finding in answer.findings:
+                        st.write(f"• {finding.claim}")
+                        st.caption("Evidence: " + ", ".join(finding.evidence_ids))
+                if answer.uncertainty:
+                    st.markdown("**Uncertainty**")
+                    for item in answer.uncertainty:
+                        st.write(f"• {item}")
+                if answer.next_steps:
+                    st.markdown("**Next steps**")
+                    for number, item in enumerate(answer.next_steps, 1):
+                        st.write(f"{number}. {item}")
+                saved = next((r for r in load_runs() if r["id"] == message.get("run_id")), None)
+                if saved:
+                    if saved.get("mode") == "mcp":
+                        warnings = summarize_mcp(saved)["warnings"]
+                        if warnings:
+                            st.warning("Evidence gathering needs review: " + " ".join(warnings))
+                    if (saved.get("checks") or {}).get("unknown_evidence_ids"):
+                        st.warning("Some evidence references are invalid. Review the investigation details.")
+    if not chat:
+        st.info("Ask a question below, or use Investigate this alert in the Investigation tab.")
+    with st.form("simple-question", clear_on_submit=True):
+        simple_question = st.text_input("Your question", placeholder="Investigate this alert and check device history")
+        submitted = st.form_submit_button("Ask")
+    if submitted:
+        if simple_question.strip():
+            submit_question(simple_question.strip())
+        else:
+            st.info("Enter a question first.")
+
 with investigation_tab:
     left, right = st.columns([3, 2])
     with right:
@@ -102,18 +162,7 @@ with investigation_tab:
         initial = st.button("Investigate this alert", disabled=bool(chat))
         question = st.chat_input("Ask about the evidence or request a follow-up")
         if initial or question:
-            question = question or "Investigate this alert. What happened, what is uncertain, and what should we check next?"
-            with st.spinner("Waiting for Ollama…"):
-                run = investigate(question, evidence, model, host, chat, scenario, num_ctx=int(num_ctx), num_predict=int(num_predict), mcp_mode=mcp_mode, **sampling)
-            st.session_state.last_run = run["id"]
-            if run["schema_valid"]:
-                chat.extend([{"role": "user", "content": question},
-                             {"role": "assistant", "run_id": run["id"], "content": Investigation.model_validate_json(run["response"]["message"]["content"]).model_dump_json()}])
-                st.session_state.last_run = run["id"]
-                st.rerun()
-            else:
-                st.error(f"Investigation failed; saved in monitoring. {run['error']}")
-                show_compact_summary(run)
+            submit_question(question)
 
 with learning_tab:
     st.subheader("Preview your next request")

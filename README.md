@@ -95,3 +95,11 @@ This is a completed-run snapshot, not live animation. `soc/execution.py` convert
 The execution view also covers **direct mode**. New runs record submission, prompt/evidence preparation, the final Ollama request, response, schema/citation checks, and saving metrics. MCP runs add their actual gathering sequence between preparation and final generation. Older runs show only stages supported by their saved data; submission and persistence details are not invented. A gathering failure does not display a final model request that never happened.
 
 In MCP mode the investigation sidebar starts with **Incoming alert** metadata. **Retrieved investigation evidence** fills with successfully fetched profiles, timelines, and optional device history after the latest run. The full original fixture is collapsed under **Scenario reference evidence** for verification. Clearing conversation or changing scenario/model/mode resets the retrieved view. Direct mode continues to show the evidence supplied upfront.
+
+### Simple Q&A
+
+The first tab presents questions and answers as readable summaries, findings with evidence IDs, uncertainty, and next steps. It shares the same conversation and investigation workflow with the existing Investigation tab; formatting requires no additional model call. Incomplete-evidence and invalid-citation warnings remain visible. Use the other tabs for JSON, tool traces, and monitoring.
+
+### Login event counts
+
+Each login record represents one attempt. Possible compromise contains 12 distinct failed logins, one successful login, and one download event; the alert states only “Multiple failed logins within five minutes.” Exact counts and successful-login outcomes require inspecting the retrieved logs. Failed attack similarly contains 40 separate failed login events. Older saved runs retain their original aggregated evidence; start a new investigation to use these updated fixtures.
