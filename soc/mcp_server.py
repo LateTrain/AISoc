@@ -3,6 +3,7 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 from soc.data import SCENARIOS
+from soc.device_data import DEVICE_HISTORY
 
 mcp = FastMCP("AI SOC synthetic evidence")
 ALERTS = {f"alert-{i}": data for i, data in enumerate(SCENARIOS.values(), 1)}
@@ -33,6 +34,14 @@ def query_login_events(user_id: str) -> dict:
         if data["user"]["id"] == user_id:
             return {"user_id": user_id, "events": data["events"]}
     raise ValueError("Unknown user ID")
+
+
+@mcp.tool()
+def get_device_history(user_id: str) -> dict:
+    """Fetch additional device familiarity evidence unavailable in the scenario reference timeline."""
+    if user_id not in DEVICE_HISTORY:
+        raise ValueError("Unknown user ID")
+    return {"user_id": user_id, "device_history": DEVICE_HISTORY[user_id]}
 
 
 @mcp.tool()

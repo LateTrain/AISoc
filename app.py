@@ -5,9 +5,10 @@ import pandas as pd
 import streamlit as st
 
 from soc.core import Investigation, build_request, investigate, load_runs
-from soc.inspector import show_request, show_run
+from soc.inspector import show_request, show_run, show_mcp_summary, show_execution
 from soc.data import SCENARIOS
 from soc.mcp_client import demo
+from soc.evidence_summary import summarize_mcp
 
 st.set_page_config(page_title="AI SOC Lab", page_icon="🔎", layout="wide")
 st.title("AI SOC Lab")
@@ -25,7 +26,7 @@ with st.sidebar:
             st.error(f"Could not connect: {exc}")
     num_ctx = st.number_input("Requested context tokens", min_value=2048, max_value=131072, value=4096, step=1024)
     num_predict = st.number_input("Maximum output tokens", min_value=128, max_value=int(num_ctx) - 1, value=1200, step=128)
-    with st.expander("Inference settings", expanded=True):
+    with st.expander("Inference settings", expanded=False):
         temperature = st.slider("Temperature", 0.0, 2.0, 0.0, 0.05, help="Controls sampling randomness. Zero selects the most likely tokens; higher values allow more variation.")
         top_p = st.slider("Top-p", 0.05, 1.0, 0.9, 0.05, help="Restricts sampling to candidates covering this cumulative probability mass.")
         top_k = st.number_input("Top-k", min_value=0, max_value=1000, value=40, help="Limits candidate tokens to the top K. Zero disables this filter.")
@@ -37,7 +38,10 @@ with st.sidebar:
     mcp_mode = st.checkbox("Gather evidence through MCP", help="Starts with alert metadata; the model requests evidence from a separate Python process.")
     scenario = st.selectbox("Scenario", list(SCENARIOS), key="scenario")
     st.caption("Change models to compare saved runs. No model downloads are triggered.")
-    st.button("Clear conversation", on_click=lambda: st.session_state.pop("chat", None))
+    def clear_conversation():
+        st.session_state.pop("chat", None)
+        st.session_state.pop("last_run", None)
+    st.button("Clear conversation", on_click=clear_conversation)
 
 context = (scenario, model, host, mcp_mode)
 if st.session_state.get("context") != context:
@@ -50,17 +54,50 @@ investigation_tab, learning_tab, mcp_tab, monitoring_tab = st.tabs(["Investigati
 with investigation_tab:
     left, right = st.columns([3, 2])
     with right:
-        st.subheader("Supplied evidence")
-        st.write(evidence["alert"])
-        st.json(evidence["user"])
-        st.dataframe(evidence["events"], width="stretch")
-        st.caption("Fixture reference: in MCP mode the model initially receives only alert metadata and must fetch supporting evidence through tools." if mcp_mode else "All evidence is supplied directly. Enable MCP mode to fetch it through tools.")
+        if mcp_mode:
+            st.subheader("Incoming alert")
+            st.json({"alert_id": f"alert-{list(SCENARIOS).index(scenario) + 1}",
+                     "alert": evidence["alert"], "user_id": evidence["user"]["id"]})
+            st.caption("The model starts with only this metadata. It must request supporting evidence through MCP.")
+            current_run = next((r for r in load_runs() if r["id"] == st.session_state.get("last_run")), None)
+            st.subheader("Retrieved investigation evidence")
+            if current_run:
+                collected = summarize_mcp(current_run)["evidence"]
+                st.caption("Latest investigation only. These records came from successful MCP calls; no fixture fallback is used.")
+                if collected.get("user"):
+                    st.markdown("**User profile · get_user**")
+                    st.json(collected["user"])
+                if collected.get("events"):
+                    st.markdown("**Event timeline · query_login_events**")
+                    st.dataframe(collected["events"], width="stretch")
+                if collected.get("device_history"):
+                    st.markdown("**Device history · get_device_history**")
+                    st.dataframe(collected["device_history"], width="stretch")
+                if not any(collected.get(key) for key in ("user", "events", "device_history")):
+                    st.info("No supporting evidence was retrieved in this run.")
+            else:
+                st.info("No evidence retrieved yet. Submit an investigation to see what the model fetches.")
+            with st.expander("Scenario reference evidence (complete fixture for verification)"):
+                st.caption("Learning reference only. This complete fixture is not automatically supplied to the model in MCP mode.")
+                st.write(evidence["alert"])
+                st.json(evidence["user"])
+                st.dataframe(evidence["events"], width="stretch")
+        else:
+            st.subheader("Supplied investigation evidence")
+            st.write(evidence["alert"])
+            st.json(evidence["user"])
+            st.dataframe(evidence["events"], width="stretch")
+            st.caption("Direct mode supplies this evidence with the request. Device history is not included.")
     with left:
         st.subheader("Analyst chat")
         for message in chat:
             with st.chat_message(message["role"]):
                 if message["role"] == "assistant":
                     st.json(json.loads(message["content"]))
+                    saved = next((r for r in load_runs() if r["id"] == message.get("run_id")), None)
+                    if saved:
+                        show_execution(saved, "chat")
+                        show_mcp_summary(saved)
                 else:
                     st.write(message["content"])
         initial = st.button("Investigate this alert", disabled=bool(chat))
@@ -72,11 +109,13 @@ with investigation_tab:
             st.session_state.last_run = run["id"]
             if run["schema_valid"]:
                 chat.extend([{"role": "user", "content": question},
-                             {"role": "assistant", "content": Investigation.model_validate_json(run["response"]["message"]["content"]).model_dump_json()}])
+                             {"role": "assistant", "run_id": run["id"], "content": Investigation.model_validate_json(run["response"]["message"]["content"]).model_dump_json()}])
                 st.session_state.last_run = run["id"]
                 st.rerun()
             else:
                 st.error(f"Investigation failed; saved in monitoring. {run['error']}")
+                show_execution(run, "failed-chat")
+                show_mcp_summary(run)
 
 with learning_tab:
     st.subheader("Preview your next request")
@@ -132,5 +171,5 @@ with monitoring_tab:
         run = runs[selected]
         if run["checks"] and run["checks"]["unknown_evidence_ids"]:
             st.warning(f"Unknown evidence IDs: {run['checks']['unknown_evidence_ids']}")
-        show_run(run)
+        show_run(run, "monitoring")
         st.download_button("Export runs (JSON)", json.dumps(runs, indent=2), "soc-runs.json", "application/json")

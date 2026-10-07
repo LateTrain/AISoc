@@ -33,9 +33,28 @@ async def connect(trace):
                 trace.append({"step": "Close MCP session and stop child process"})
 
 
+def arguments_in_scope(name, args, metadata):
+    key = "alert_id" if name == "get_alert" else "user_id"
+    return (name in {"get_alert", "get_user", "query_login_events", "get_device_history"}
+            and isinstance(args, dict) and set(args) == {key}
+            and args[key] == metadata[key])
+
+
+def collect_result(evidence, name, data):
+    key = {"get_alert": "alert", "get_user": "user", "query_login_events": "events",
+           "get_device_history": "device_history"}.get(name)
+    if key:
+        evidence[key] = data if key in {"alert", "user"} else data[key]
+
+
 async def call(session, name, args, trace, source):
     started = time.perf_counter()
-    result = await session.call_tool(name, args)
+    try:
+        result = await session.call_tool(name, args)
+    except Exception as exc:
+        trace.append({"step": "Failed tool call", "source": source, "tool": name,
+                      "arguments": args, "error": str(exc)})
+        raise
     trace.append({"step": "MCP tools/call", "source": source, "tool": name, "arguments": args,
                   "latency_s": round(time.perf_counter() - started, 3),
                   "result": result.model_dump(mode="json", by_alias=True)})
@@ -70,7 +89,7 @@ def demo(alert_id):
 async def gather(request, host, trace):
     """Starts with alert metadata only. Final structured generation occurs separately."""
     metadata = json.loads(request["messages"][1]["content"].split("\n", 1)[1])
-    evidence = {"alert": request["messages"][1]["content"], "user": {}, "events": []}
+    evidence = {"alert": request["messages"][1]["content"], "user": {}, "events": [], "device_history": []}
     async with connect(trace) as (session, tools):
         await call(session, "server_info", {}, trace, "App process inspection")
         allowed = {t.name for t in tools if t.name != "server_info"}
@@ -91,6 +110,7 @@ async def gather(request, host, trace):
                 messages.append(message)
                 requested = message.get("tool_calls") or []
                 if not requested:
+                    trace.append({"step": "Gathering stopped", "reason": "No more tools requested", "turn": turn + 1})
                     break
                 for tool_call in requested:
                     if calls >= 6:
@@ -99,9 +119,7 @@ async def gather(request, host, trace):
                     calls += 1
                     function = tool_call["function"]
                     name, args = function["name"], function["arguments"]
-                    scope_ok = (isinstance(args, dict) and
-                                (args.get("alert_id") == metadata["alert_id"] if name == "get_alert"
-                                 else args.get("user_id") == metadata["user_id"]))
+                    scope_ok = arguments_in_scope(name, args, metadata)
                     if name not in allowed or not scope_ok:
                         data, error = {"error": "Unknown tool or arguments outside the selected alert scope"}, True
                         trace.append({"step": "Rejected tool", "tool": name, "arguments": args})
@@ -109,12 +127,7 @@ async def gather(request, host, trace):
                         data, error = await call(session, name, args, trace, "Model requested")
                     messages.append({"role": "tool", "tool_name": name, "content": json.dumps(data)})
                     if not error:
-                        if name == "get_alert":
-                            evidence["alert"] = data
-                        elif name == "get_user":
-                            evidence["user"] = data
-                        elif name == "query_login_events":
-                            evidence["events"] = data["events"]
+                        collect_result(evidence, name, data)
             else:
                 trace.append({"step": "Model turn limit reached", "limit": 4})
     return evidence

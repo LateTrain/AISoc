@@ -123,3 +123,37 @@ python -m unittest discover -s tests -v
 - [Official MCP Python SDK v1 documentation](https://py.sdk.modelcontextprotocol.io/v1/) — the pinned SDK API used here.
 - [Ollama tool calling](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx) — model tool requests and result messages.
 - [Python asyncio](https://docs.python.org/3/library/asyncio.html) — coroutines, event loops, and timeouts.
+
+
+## Comparing reference evidence with retrieved evidence
+
+The investigation panel is now **Scenario reference evidence**. It shows the fixture for your understanding. Direct mode receives this fixture; MCP mode begins with only alert ID, description, and user ID. `get_user` and `query_login_events` retrieve the same reference data through actual MCP calls. That demonstrates the process boundary, rather than introducing new facts.
+
+The separate [soc/device_data.py](soc/device_data.py) source adds facts that are not in those fixtures. `get_device_history(user_id)` exposes it only through MCP. Records have stable IDs such as `device-u101-1`, which findings can cite alongside event IDs. The benign scenario has a familiar device, possible compromise has an unfamiliar device, failed attack has a known device with no attribution to the failed attempts, and insufficient evidence has limited retention and missing device identity. These are synthetic observations, not definitive verdicts.
+
+Use this comparison sequence:
+
+1. Select MCP mode and run an investigation. Look immediately below its answer for **MCP evidence summary**.
+2. Compare **Initial alert-only request before MCP gathering** in Learning inspector with the scenario reference panel. Supporting timeline and device records are absent from initial metadata.
+3. Expand **Model tool selection** in the trace to see what the model requested. Discovery and a request alone do not establish retrieval.
+4. Read the successful-call table and any rejected/failed entries. It uses recorded MCP results with `isError: false`; `server_info` is kept in a separate process-inspection expander.
+5. Check event count and profile status. Missing profile or timeline, errors, or execution limits produce an incomplete/review warning. Device history is optional: not requesting it does not by itself make core gathering incomplete.
+6. Inspect **Collected MCP evidence**. `events` and `user` are retrieved reference data; `device_history` is the additional source. If the device tool was not successfully called, no device evidence is attributed to the run.
+7. Compare the final request's evidence message with the collected records. Only fetched device history enters that request. A citation to an unfetched device ID is invalid. Retrieval alone does not prove the model used a record; inspect its claims and citations.
+8. Repeat in direct mode: no device history is automatically supplied. In MCP mode you can ask “Check device history before answering,” but tool selection still belongs to the model.
+
+Historical runs show the same summary in Model monitoring. Older runs can lack initial-request or collected-evidence fields: the summary reconstructs what it can from successful recorded results, and does not invent missing evidence. If gathering fails before final generation, recovered partial results in the summary are not evidence that a final model request occurred; inspect the error and trace.
+
+To understand the implementation changes, review `arguments_in_scope` and `collect_result` in [soc/mcp_client.py](soc/mcp_client.py), `citation_check` in [soc/core.py](soc/core.py), and [soc/evidence_summary.py](soc/evidence_summary.py). The four-turn, six-call limits and existing timeouts are preserved.
+
+## Read the execution graph
+
+Below an MCP answer, **Investigation execution** provides a map of the recorded run. Repeated model-turn nodes indicate the tool-selection loop; repeated tool nodes represent separate calls, not a deduplicated list. Color labels distinguish recorded activity, successful results, warnings, failures, rejections, and unknown legacy outcomes. The graph's arrows indicate chronological execution rather than all possible workflow paths.
+
+Expand the view and select a step to inspect its original payload. Compare a model turn's tool requests with subsequent executed calls. A call omitted because of a limit is not shown as a successful execution. Normal gathering stops are now recorded explicitly; older runs infer them from a model response without tool calls. `server_info` remains in the separate process-inspection section.
+
+Review [soc/execution.py](soc/execution.py) for the UI-independent event projection and graph generation, and `show_execution` in [soc/inspector.py](soc/inspector.py) for rendering. Events can be projected from an incrementally growing trace, preparing for future real-time updates. The current synchronous UI displays the graph after completion; live transport, in-progress statuses, and streaming updates are not implemented yet.
+
+The visual now covers the full application flow in both modes: submission → prompt preparation → optional MCP gathering → final Ollama request → response → schema/citation validation → saved monitoring run. Direct mode prepares reference evidence immediately; MCP mode prepares alert metadata and later assembles retrieved evidence. New runs record the generation-start boundary and persistence metadata, so a gathering failure cannot be confused with a completed final model call. Historical runs without those fields retain only the stages their records support.
+
+The main MCP investigation panel now separates **Incoming alert** from **Retrieved investigation evidence**. Before an investigation, only alert metadata is shown prominently. Afterward, the latest run's successful results populate the panel. The full fixture is available in a collapsed **Scenario reference evidence** section for comparison; it is not a fallback for missing retrievals. This display updates after completion, not in real time yet.

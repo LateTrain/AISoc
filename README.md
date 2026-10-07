@@ -6,12 +6,24 @@ For a guided code walkthrough and exercises, see [MCP learning guide](MCP_LEARNI
 
 ## Run
 
+Run from the project folder. The existing environment is already set up:
+
+```sh
+source .venv/bin/activate
+python -m streamlit run app.py
+```
+
+Open http://localhost:8501. Keep this terminal running. **Ctrl+C** stops the app; **Ctrl+Z** suspends it and can leave an unresponsive process holding the port. If you accidentally suspend it, use `jobs` and `fg` in the same terminal, then continue or stop it with Ctrl+C.
+
+If Ollama is not already running, start `ollama serve` in a **separate terminal**, or open the Ollama desktop app. `ollama serve` stays in the foreground, so placing it before Streamlit in the same terminal prevents the next command from running.
+
+For a fresh checkout only:
+
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-ollama serve  # only if Ollama is not already running
-streamlit run app.py
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
 ```
 
 Select a scenario, keep `llama3.2:latest` or enter another installed model, and click **Investigate this alert**. Ask follow-up questions in chat. Changing the model or scenario resets conversation context.
@@ -66,3 +78,20 @@ Then enable **Gather evidence through MCP** and investigate an alert. The model 
 The final structured response is generated separately using only the evidence successfully fetched. **Learning inspector** and historical monitoring show each intermediate model request/response and each MCP call. End-to-end latency includes all stages; the main token columns describe the final generation only. Intermediate usage is available in the trace. MCP mode investigates each question afresh without prior conversation context; it does not yet support conversational tool history. Fixture evidence remains visible to you for comparison but is not automatically supplied to the model.
 
 Try the no-model demo first, then compare model behavior: discovering and invoking tools is separate from whether a model selects useful tools. This implementation pins the SDK's v1 API for a small explicit stdio example: [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/v1/). Model selection uses [Ollama tool calling](https://github.com/ollama/ollama/blob/main/docs/capabilities/tool-calling.mdx).
+
+
+### Visible evidence gathering
+
+**Scenario reference evidence** is the fixture visible to you, not the full initial model input in MCP mode. Each MCP answer now has an evidence summary beneath it; historical runs show the same summary. It separates successful model-requested retrievals, failed/rejected calls, and app-only process inspection.
+
+`get_device_history` provides additional synthetic records stored separately in `soc/device_data.py`. Direct mode does not receive them. Try asking the MCP analyst to check device familiarity and confirm the tool actually succeeded before attributing new evidence to it. Device retrieval is optional; no results are silently injected. Restart Streamlit after updating these Python modules.
+
+### Graphical execution view
+
+Each MCP answer now has an **Investigation execution** graph above its evidence summary. The graph follows actual recorded model turns and tool outcomes, including repeated calls, rejections, limits, and final validation. **Expand execution view and inspect steps** shows the full vertical sequence and lets you select a step to read its recorded payload. The same view is available for historical runs.
+
+This is a completed-run snapshot, not live animation. `soc/execution.py` converts trace entries into stable execution events independently of Streamlit. Future live updates can reuse this representation while the workflow publishes progress. Older runs infer a normal stop only when a recorded model response contains no tool calls; missing outcomes remain unknown. Server process inspection stays separate from investigation tools.
+
+The execution view also covers **direct mode**. New runs record submission, prompt/evidence preparation, the final Ollama request, response, schema/citation checks, and saving metrics. MCP runs add their actual gathering sequence between preparation and final generation. Older runs show only stages supported by their saved data; submission and persistence details are not invented. A gathering failure does not display a final model request that never happened.
+
+In MCP mode the investigation sidebar starts with **Incoming alert** metadata. **Retrieved investigation evidence** fills with successfully fetched profiles, timelines, and optional device history after the latest run. The full original fixture is collapsed under **Scenario reference evidence** for verification. Clearing conversation or changing scenario/model/mode resets the retrieved view. Direct mode continues to show the evidence supplied upfront.
